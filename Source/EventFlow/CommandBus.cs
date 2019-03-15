@@ -35,6 +35,8 @@ using EventFlow.Core.Caching;
 using EventFlow.Exceptions;
 using EventFlow.Extensions;
 using EventFlow.Logs;
+using EventFlow.Sagas;
+using static EventFlow.Aggregates.AggregateStore;
 
 namespace EventFlow
 {
@@ -43,17 +45,20 @@ namespace EventFlow
         private readonly ILog _log;
         private readonly IResolver _resolver;
         private readonly IAggregateStore _aggregateStore;
+        private readonly ISagaStore _sagaStore;
         private readonly IMemoryCache _memoryCache;
 
         public CommandBus(
             ILog log,
             IResolver resolver,
             IAggregateStore aggregateStore,
+            ISagaStore sagaStore,
             IMemoryCache memoryCache)
         {
             _log = log;
             _resolver = resolver;
             _aggregateStore = aggregateStore;
+            _sagaStore = sagaStore;
             _memoryCache = memoryCache;
         }
 
@@ -135,12 +140,31 @@ namespace EventFlow
 
             var commandHandler = commandHandlers.Single();
 
+            if (typeof(ISaga).IsAssignableFrom(typeof(TAggregate)) && typeof(ISagaId).IsAssignableFrom(typeof(TIdentity)))
+            {
+                dynamic _command = command;
+                var saga = await CallFunction(_command, commandExecutionDetails, commandHandler, cancellationToken).ConfigureAwait(false);
+                return new AggregateUpdateResult<TResult>(default, new IDomainEvent[] { });
+            }
+
             return await _aggregateStore.UpdateAsync<TAggregate, TIdentity, TResult>(
                 command.AggregateId,
                 command.SourceId,
                 (a, c) => (Task<TResult>) commandExecutionDetails.Invoker(commandHandler, a, command, c),
                 cancellationToken)
                 .ConfigureAwait(false);
+        }
+
+        private async Task<TSaga> CallFunction<TSaga, TIdentity, TResult>(
+            ICommand<TSaga, TIdentity, TResult> command,
+            CommandExecutionDetails commandExecutionDetails,
+            ICommandHandler commandHandler,
+            CancellationToken cancellationToken)
+            where TSaga : IAggregateRoot<TIdentity>, ISaga
+            where TIdentity : ISagaId
+            where TResult : IExecutionResult
+        {
+            return await _sagaStore.UpdateAsync<TSaga>(command.AggregateId, command.SourceId, (a, c) => commandExecutionDetails.Invoker(commandHandler, a, command, c), cancellationToken).ConfigureAwait(false);
         }
 
         private class CommandExecutionDetails
